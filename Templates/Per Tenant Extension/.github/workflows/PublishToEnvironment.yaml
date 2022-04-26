@@ -90,9 +90,9 @@ jobs:
             Write-Host "Using ${{ steps.envName.outputs.envName }}-AuthContext secret"
           }
           else {
-            $authContext = [System.Environment]::GetEnvironmentVariable('AuthContext')
+            $authContext = [System.Environment]::GetEnvironmentVariable('${{ steps.envName.outputs.envName }}_AuthContext')
             if ($authContext) {
-              Write-Host "Using AuthContext secret"
+              Write-Host "Using ${{ steps.envName.outputs.envName }}_AuthContext secret"
             }
             else {
               Write-Host "::Error::No AuthContext provided"
