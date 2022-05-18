@@ -16,6 +16,7 @@ Param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
+$bcContainerHelperPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -33,7 +34,6 @@ try {
     } -ArgumentList $genericImageName | Out-Null
 
     $runAlPipelineParams = @{}
-    $environment = 'GitHubActions'
     if ($project  -eq ".") { $project = "" }
     $baseFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
     $sharedFolder = ""
@@ -116,8 +116,6 @@ try {
     $artifact = $repo.artifact
     $installApps = $repo.installApps
     $installTestApps = $repo.installTestApps
-    $doNotBuildTests = $repo.doNotBuildTests
-    $doNotRunTests = $repo.doNotRunTests
 
     if ($repo.appDependencyProbingPaths) {
         Write-Host "Downloading dependencies ..."
@@ -133,7 +131,7 @@ try {
 
     # Check if insidersastoken is used (and defined)
 
-    if ($CodeSignCertificateUrl -and $CodeSignCertificatePassword) {
+    if (!$repo.doNotSignApps -and $CodeSignCertificateUrl -and $CodeSignCertificatePassword) {
         $runAlPipelineParams += @{ 
             "CodeSignCertPfxFile" = $codeSignCertificateUrl
             "CodeSignCertPfxPassword" = ConvertTo-SecureString -string $codeSignCertificatePassword -AsPlainText -Force
@@ -154,7 +152,13 @@ try {
     else {
         try {
             $releasesJson = GetReleases -token $token -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY
-            $latestRelease = $releasesJson | Where-Object { -not ($_.prerelease -or $_.draft) } | Select-Object -First 1
+            if ($env:GITHUB_REF_NAME -like 'release/*') {
+                # For CI/CD in a release branch use that release as previous build
+                $latestRelease = $releasesJson | Where-Object { $_.tag_name -eq "$env:GITHUB_REF_NAME".SubString(8) } | Select-Object -First 1
+            }
+            else {
+                $latestRelease = $releasesJson | Where-Object { -not ($_.prerelease -or $_.draft) } | Select-Object -First 1
+            }
             if ($latestRelease) {
                 Write-Host "Using $($latestRelease.name) as previous release"
                 $artifactsFolder = Join-Path $baseFolder "artifacts"
@@ -223,6 +227,20 @@ try {
         }
     }
     
+    "doNotBuildTests",
+    "doNotRunTests",
+    "doNotPublishApps",
+    "installTestRunner",
+    "installTestFramework",
+    "installTestLibraries",
+    "installPerformanceToolkit",
+    "enableCodeCop",
+    "enableAppSourceCop",
+    "enablePerTenantExtensionCop",
+    "enableUICop" | ForEach-Object {
+        if ($repo."$_") { $runAlPipelineParams += @{ "$_" = $true } }
+    }
+
     Write-Host "Invoke Run-AlPipeline"
     Run-AlPipeline @runAlPipelineParams `
         -pipelinename $workflowName `
@@ -244,23 +262,11 @@ try {
         -previousApps $previousApps `
         -appFolders $repo.appFolders `
         -testFolders $repo.testFolders `
-        -doNotBuildTests:$doNotBuildTests `
-        -doNotRunTests:$doNotRunTests `
         -buildOutputFile $buildOutputFile `
         -testResultsFile $testResultsFile `
         -testResultsFormat 'JUnit' `
-        -installTestRunner:$repo.installTestRunner `
-        -installTestFramework:$repo.installTestFramework `
-        -installTestLibraries:$repo.installTestLibraries `
-        -installPerformanceToolkit:$repo.installPerformanceToolkit `
-        -enableCodeCop:$repo.enableCodeCop `
-        -enableAppSourceCop:$repo.enableAppSourceCop `
-        -enablePerTenantExtensionCop:$repo.enablePerTenantExtensionCop `
-        -enableUICop:$repo.enableUICop `
-        -customCodeCops:$repo.customCodeCops `
-        -azureDevOps:($environment -eq 'AzureDevOps') `
-        -gitLab:($environment -eq 'GitLab') `
-        -gitHubActions:($environment -eq 'GitHubActions') `
+        -customCodeCops $repo.customCodeCops `
+        -gitHubActions `
         -failOn $repo.failOn `
         -rulesetFile $repo.rulesetFile `
         -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `

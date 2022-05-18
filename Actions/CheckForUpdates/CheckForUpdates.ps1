@@ -18,6 +18,7 @@ Param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
+$bcContainerHelperPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -42,6 +43,9 @@ try {
             $templateUrl += "@main"
         }
     }
+    if ($templateUrl -notlike "https://*") {
+        $templateUrl = "https://github.com/$templateUrl"
+    }
 
     $RepoSettingsFile = ".github\AL-Go-Settings.json"
     if (Test-Path $RepoSettingsFile) {
@@ -52,8 +56,13 @@ try {
     }
 
     $updateSettings = $true
-    if ($repoSettings.ContainsKey("TemplateUrl") -and $repoSettings.TemplateUrl -eq $templateUrl) {
-        $updateSettings = $false
+    if ($repoSettings.ContainsKey("TemplateUrl")) {
+        if ($templateUrl.StartsWith('@')) {
+            $templateUrl = "$($repoSettings.TemplateUrl.Split('@')[0])$templateUrl"
+        }
+        if ($repoSettings.TemplateUrl -eq $templateUrl) {
+            $updateSettings = $false
+        }
     }
 
     AddTelemetryProperty -telemetryScope $telemetryScope -key "templateUrl" -value $templateUrl
@@ -132,6 +141,19 @@ try {
                 $srcPattern = "on:`r`n  workflow_dispatch:`r`n"
                 $replacePattern = "on:`r`n  schedule:`r`n  - cron: '$($repoSettings."$workflowScheduleKey")'`r`n  workflow_dispatch:`r`n"
                 $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+            }
+            
+            if ($baseName -ne "UpdateGitHubGoSystemFiles") {
+                if ($repoSettings.ContainsKey("runs-on")) {
+                    $srcPattern = "runs-on: [ windows-latest ]`r`n"
+                    $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
+                    $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+                    if (!($repoSettings.ContainsKey("gitHubRunner"))) {
+                        $srcPattern = "runs-on: `${{ fromJson(needs.Initialization.outputs.githubRunner) }}`r`n"
+                        $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
+                        $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+                    }
+                }
             }
                 
             $dstFile = Join-Path $dstFolder $fileName
