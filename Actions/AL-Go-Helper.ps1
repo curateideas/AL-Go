@@ -51,30 +51,6 @@ $testRunnerApps = @($permissionsMockAppId, $testRunnerAppId) + $performanceToolk
 
 $MicrosoftTelemetryConnectionString = "InstrumentationKey=84bd9223-67d4-4378-8590-9e4a46023be2;IngestionEndpoint=https://westeurope-1.in.applicationinsights.azure.com/"
 
-function invoke-git {
-    Param(
-        [parameter(mandatory = $true, position = 0)][string] $command,
-        [parameter(mandatory = $false, position = 1, ValueFromRemainingArguments = $true)] $remaining
-    )
-
-    Write-Host -ForegroundColor Yellow "git $command $remaining"
-    git $command $remaining
-    if ($lastexitcode) { throw "git $command error" }
-}
-
-function invoke-gh {
-    Param(
-        [parameter(mandatory = $true, position = 0)][string] $command,
-        [parameter(mandatory = $false, position = 1, ValueFromRemainingArguments = $true)] $remaining
-    )
-
-    Write-Host -ForegroundColor Yellow "gh $command $remaining"
-    $ErrorActionPreference = "SilentlyContinue"
-    gh $command $remaining
-    $ErrorActionPreference = "Stop"
-    if ($lastexitcode) { throw "gh $command error" }
-}
-
 function ConvertTo-HashTable {
     [CmdletBinding()]
     Param(
@@ -83,7 +59,7 @@ function ConvertTo-HashTable {
     )
     $ht = @{}
     if ($object) {
-        $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
+        $object.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }
     }
     $ht
 }
@@ -210,11 +186,28 @@ function DownloadAndImportBcContainerHelper {
         $repoSettingsPath = Join-Path $baseFolder $repoSettingsFile
         if (-not (Test-Path $repoSettingsPath)) {
             $repoSettingsPath = Join-Path $baseFolder "..\$repoSettingsFile"
+            if (-not (Test-Path $repoSettingsPath)) {
+                $repoSettingsPath = Join-Path $baseFolder "..\..\$repoSettingsFile"
+            }
         }
         if (Test-Path $repoSettingsPath) {
             if (-not $BcContainerHelperVersion) {
                 $repoSettings = Get-Content $repoSettingsPath -Encoding UTF8 | ConvertFrom-Json | ConvertTo-HashTable
-                if ($repoSettings.ContainsKey("BcContainerHelperVersion")) {
+                $ap = "$ENV:GITHUB_ACTION_PATH".Split('\')
+                if ($ap -and $ap.Count -gt 4) {
+                    $branch = $ap[$ap.Count-2]
+                    $owner = $ap[$ap.Count-4]
+                    if ($owner -eq "freddydk") {
+                        $bcContainerHelperVersion = "dev"
+                    }
+                    elseif ($owner -eq "businesscentralapps") {
+                        $bcContainerHelperVersion = "preview"
+                    }
+                    elseif ($owner -eq "microsoft" -and $branch -eq "preview") {
+                        $bcContainerHelperVersion = "preview"
+                    }
+                }
+                if ($bcContainerHelperVersion -eq "" -and $repoSettings.ContainsKey("BcContainerHelperVersion")) {
                     $BcContainerHelperVersion = $repoSettings.BcContainerHelperVersion
                 }
             }
@@ -319,7 +312,7 @@ function MergeCustomObjectIntoOrderedDictionary {
                         $srcElmType = $srcElm.GetType().Name
                         if ($srcElmType -eq "PSCustomObject") {
                             $ht = [ordered]@{}
-                            $srcElm.PSObject.Properties | Sort-Object -Property Name -Culture "iv-iv" | Foreach { $ht[$_.Name] = $_.Value }
+                            $srcElm.PSObject.Properties | Sort-Object -Property Name -Culture "iv-iv" | ForEach-Object { $ht[$_.Name] = $_.Value }
                             $dst."$prop" += @($ht)
                         }
                         else {
@@ -362,6 +355,7 @@ function ReadSettings {
         "insiderSasTokenSecretName"              = "InsiderSasToken"
         "ghTokenWorkflowSecretName"              = "GhTokenWorkflow"
         "adminCenterApiCredentialsSecretName"    = "AdminCenterApiCredentials"
+        "applicationInsightsConnectionStringSecretName" = "ApplicationInsightsConnectionString"
         "keyVaultCertificateUrlSecretName"       = ""
         "keyVaultCertificatePasswordSecretName"  = ""
         "keyVaultClientIdSecretName"             = ""
@@ -373,6 +367,7 @@ function ReadSettings {
         "appFolders"                             = @()
         "testDependencies"                       = @()
         "testFolders"                            = @()
+        "bcptTestFolders"                        = @()
         "installApps"                            = @()
         "installTestApps"                        = @()
         "installOnlyReferencedApps"              = $true
@@ -391,14 +386,17 @@ function ReadSettings {
         "rulesetFile"                            = ""
         "doNotBuildTests"                        = $false
         "doNotRunTests"                          = $false
+        "doNotRunBcptTests"                      = $false
         "doNotPublishApps"                       = $false
         "doNotSignApps"                          = $false
         "appSourceCopMandatoryAffixes"           = @()
+        "obsoleteTagMinAllowedMajorMinor"        = ""
         "memoryLimit"                            = ""
         "templateUrl"                            = ""
         "templateBranch"                         = ""
         "appDependencyProbingPaths"              = @()
-        "githubRunner"                           = "windows-latest"
+        "runs-on"                                = "windows-latest"
+        "githubRunner"                           = ""
         "cacheImageName"                         = "my"
         "cacheKeepDays"                          = 3
         "alwaysBuildAllProjects"                 = $false
@@ -443,6 +441,9 @@ function ReadSettings {
         }
     }
 
+    if ($settings.githubRunner -eq "") {
+        $settings.githubRunner = $settings."runs-on"
+    }
     $settings
 }
 
@@ -451,7 +452,8 @@ function AnalyzeRepo {
         [hashTable] $settings,
         [string] $baseFolder,
         [string] $insiderSasToken,
-        [switch] $doNotCheckArtifactSetting
+        [switch] $doNotCheckArtifactSetting,
+        [switch] $doNotIssueWarnings
     )
 
     if (!$runningLocal) {
@@ -460,7 +462,6 @@ function AnalyzeRepo {
 
     # Check applicationDependency
     [Version]$settings.applicationDependency | Out-null
-
 
     Write-Host "Checking type"
     if ($settings.type -eq "PTE") {
@@ -496,11 +497,12 @@ function AnalyzeRepo {
         }
     }
 
-    if (-not (@($settings.appFolders)+@($settings.testFolders))) {
+    if (-not (@($settings.appFolders)+@($settings.testFolders)+@($settings.bcptTestFolders))) {
         Get-ChildItem -Path $baseFolder -Directory | Where-Object { Test-Path -Path (Join-Path $_.FullName "app.json") } | ForEach-Object {
             $folder = $_
             $appJson = Get-Content (Join-Path $folder.FullName "app.json") -Encoding UTF8 | ConvertFrom-Json
             $isTestApp = $false
+            $isBcptTestApp = $false
             if ($appJson.PSObject.Properties.Name -eq "dependencies") {
                 $appJson.dependencies | ForEach-Object {
                     if ($_.PSObject.Properties.Name -eq "AppId") {
@@ -509,12 +511,18 @@ function AnalyzeRepo {
                     else {
                         $id = $_.Id
                     }
-                    if ($testRunnerApps.Contains($id)) { 
+                    if ($performanceToolkitApps.Contains($id)) { 
+                        $isBcptTestApp = $true
+                    }
+                    elseif ($testRunnerApps.Contains($id)) { 
                         $isTestApp = $true
                     }
                 }
             }
-            if ($isTestApp) {
+            if ($isBcptTestApp) {
+                $settings.bcptTestFolders += @($_.Name)
+            }
+            elseif ($isTestApp) {
                 $settings.testFolders += @($_.Name)
             }
             else {
@@ -525,15 +533,24 @@ function AnalyzeRepo {
 
     Write-Host "Checking appFolders and testFolders"
     $dependencies = [ordered]@{}
-    $true, $false | ForEach-Object {
-        $appFolder = $_
+    1..3 | ForEach-Object {
+        $appFolder = $_ -eq 1
+        $testFolder = $_ -eq 2
+        $bcptTestFolder = $_ -eq 3
         if ($appFolder) {
             $folders = @($settings.appFolders)
             $descr = "App folder"
         }
-        else {
+        elseif ($testFolder) {
             $folders = @($settings.testFolders)
             $descr = "Test folder"
+        }
+        elseif ($bcptTestFolder) {
+            $folders = @($settings.bcptTestFolders)
+            $descr = "Bcpt Test folder"
+        }
+        else {
+            throw "Internal error"
         }
         $folders | ForEach-Object {
             $folderName = $_
@@ -542,21 +559,29 @@ function AnalyzeRepo {
             }
             $folder = Join-Path $baseFolder $folderName
             $appJsonFile = Join-Path $folder "app.json"
+            $bcptSuiteFile = Join-Path $folder "bcptSuite.json"
             $removeFolder = $false
             if (-not (Test-Path $folder -PathType Container)) {
-                OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not exist."
+                if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not exist" }
                 $removeFolder = $true
             }
             elseif (-not (Test-Path $appJsonFile -PathType Leaf)) {
-                OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not contain the source code for an app (no app.json file)."
+                if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not contain the source code for an app (no app.json file)" }
+                $removeFolder = $true
+            }
+            elseif ($bcptTestFolder -and (-not (Test-Path $bcptSuiteFile -PathType Leaf))) {
+                if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not contain a BCPT Suite (bcptSuite.json)" }
                 $removeFolder = $true
             }
             if ($removeFolder) {
                 if ($appFolder) {
                     $settings.appFolders = @($settings.appFolders | Where-Object { $_ -ne $folderName })
                 }
-                else {
+                elseif ($testFolder) {
                     $settings.testFolders = @($settings.testFolders | Where-Object { $_ -ne $folderName })
+                }
+                elseif ($bcptTestFolder) {
+                    $settings.bcptTestFolders = @($settings.bcptTestFolders | Where-Object { $_ -ne $folderName })
                 }
             }
             else {
@@ -638,7 +663,7 @@ function AnalyzeRepo {
         }
     
         if ($settings.additionalCountries -or $country -ne $settings.country) {
-            if ($country -ne $settings.country) {
+            if ($country -ne $settings.country -and !$doNotIssueWarnings) {
                 OutputWarning -message "artifact definition in $ALGoSettingsFile uses a different country ($country) than the country definition ($($settings.country))"
             }
             Write-Host "Checking Country and additionalCountries"
@@ -708,6 +733,7 @@ function AnalyzeRepo {
 
     Write-Host "Analyzing Test App Dependencies"
     if ($settings.testFolders) { $settings.installTestRunner = $true }
+    if ($settings.bcptTestFolders) { $settings.installPerformanceToolkit = $true }
 
     $settings.appDependencies + $settings.testDependencies | ForEach-Object {
         $dep = $_
@@ -719,12 +745,16 @@ function AnalyzeRepo {
         }
     }
 
-    if (-not $settings.testFolders) {
-        OutputWarning -message "No test apps found in testFolders in $ALGoSettingsFile"
-        $doNotRunTests = $true
+    if (!$settings.doNotRunBcptTests -and -not $settings.bcptTestFolders) {
+        if (!$doNotIssueWarnings) { OutputWarning -message "No performance test apps found in bcptTestFolders in $ALGoSettingsFile" }
+        $settings.doNotRunBcptTests = $true
+    }
+    if (!$settings.doNotRunTests -and -not $settings.testFolders) {
+        if (!$doNotIssueWarnings) { OutputWarning -message "No test apps found in testFolders in $ALGoSettingsFile" }
+        $settings.doNotRunTests = $true
     }
     if (-not $settings.appFolders) {
-        OutputWarning -message "No apps found in appFolders in $ALGoSettingsFile"
+        if (!$doNotIssueWarnings) { OutputWarning -message "No apps found in appFolders in $ALGoSettingsFile" }
     }
 
     $settings
@@ -954,6 +984,21 @@ function Enter-Value {
     $answer
 }
 
+function OptionallyConvertFromBase64 {
+    Param(
+        [string] $value
+    )
+
+    if ($value.StartsWith('::') -and $value.EndsWith('::')) {
+        if ($value.Length -eq 4) {
+            ""
+        }
+        else {
+            [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value.Substring(2, $value.Length-4)))
+        }
+    }
+}
+
 function GetContainerName([string] $project) {
     "bc$($project -replace "\W")$env:GITHUB_RUN_ID"
 }
@@ -1038,6 +1083,15 @@ function CreateDevEnv {
                     if ($insiderSasTokenSecret) { $insiderSasToken = $insiderSasTokenSecret.SecretValue | Get-PlainText }
 
                     # do not add codesign cert.
+
+                    if ($settings.applicationInsightsConnectionStringSecretName) {
+                        $applicationInsightsConnectionStringSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.applicationInsightsConnectionStringSecretName
+                        if ($applicationInsightsConnectionStringSecret) {
+                            $runAlPipelineParams += @{ 
+                                "applicationInsightsConnectionString" = $applicationInsightsConnectionStringSecret.SecretValue | Get-PlainText
+                            }
+                        }
+                    }
                     
                     if ($settings.KeyVaultCertificateUrlSecretName) {
                         $KeyVaultCertificateUrlSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.KeyVaultCertificateUrlSecretName
@@ -1101,6 +1155,23 @@ function CreateDevEnv {
         $installApps = $repo.installApps
         $installTestApps = $repo.installTestApps
 
+        $buildArtifactFolder = Join-Path $baseFolder "output"
+        if (Test-Path $buildArtifactFolder) {
+            Get-ChildItem -Path $buildArtifactFolder -Include * -File | ForEach-Object { $_.Delete()}
+        }
+        else {
+            New-Item $buildArtifactFolder -ItemType Directory | Out-Null
+        }
+
+        if ($repo.appDependencyProbingPaths) {
+            Write-Host "Downloading dependencies ..."
+            $repo.appDependencyProbingPaths = @($repo.appDependencyProbingPaths | ForEach-Object { New-Object -Type PSObject -Property $_ } )
+            $installApps += Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -mask "-Apps-" -saveToPath $buildArtifactFolder -api_url 'https://api.github.com' -token ""
+            Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -mask "-TestApps-" -saveToPath $buildArtifactFolder -api_url 'https://api.github.com' -token "" | ForEach-Object {
+                $installTestApps += "($_)"
+            }
+        }
+    
         if ($repo.versioningStrategy -eq -1) {
             if ($kind -eq "cloud") { throw "Versioningstrategy -1 cannot be used on cloud" }
             $artifactVersion = [Version]$repo.artifact.Split('/')[4]
@@ -1116,14 +1187,6 @@ function CreateDevEnv {
             }
         }
 
-        $buildArtifactFolder = Join-Path $baseFolder "output"
-        if (Test-Path $buildArtifactFolder) {
-            Get-ChildItem -Path $buildArtifactFolder -Include * -File | ForEach-Object { $_.Delete()}
-        }
-        else {
-            New-Item $buildArtifactFolder -ItemType Directory | Out-Null
-        }
-    
         $allTestResults = "testresults*.xml"
         $testResultsFile = Join-Path $baseFolder "TestResults.xml"
         $testResultsFiles = Join-Path $baseFolder $allTestResults
@@ -1249,7 +1312,9 @@ function CreateDevEnv {
             -failOn $repo.failOn `
             -rulesetFile $repo.rulesetFile `
             -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
+            -obsoleteTagMinAllowedMajorMinor $repo.obsoleteTagMinAllowedMajorMinor `
             -doNotRunTests `
+            -doNotRunBcptTests `
             -useDevEndpoint `
             -keepContainer
     }
@@ -1268,7 +1333,7 @@ function ConvertTo-HashTable() {
     )
     $ht = @{}
     if ($object) {
-        $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
+        $object.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }
     }
     $ht
 }
