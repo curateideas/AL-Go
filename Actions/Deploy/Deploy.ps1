@@ -30,6 +30,8 @@ try {
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0075' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
+    $EnvironmentName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($environmentName))
+
     if ($projects -eq '') { $projects = "*" }
 
     $apps = @()
@@ -74,21 +76,17 @@ try {
     }
     else {
         New-Item $baseFolder -ItemType Directory | Out-Null
-        $allArtifacts = GetArtifacts -token $token -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY -mask "*-Apps-*"
-        $artifactsVersion = $artifacts
-        if ($artifacts -eq "latest") {
-            $artifact = $allArtifacts | Where-Object { $_.name -like "*-Apps-*" } | Select-Object -First 1
-            $artifactsVersion = $artifact.name.SubString($artifact.name.IndexOf('-Apps-')+6)
-        }
-        $projects.Split(',') | ForEach-Object {
-            $project = $_
-            $allArtifacts | Where-Object { $_.name -like "$($project.Replace('\','_'))-Apps-$artifactsVersion" } | ForEach-Object {
-                DownloadArtifact -token $token -artifact $_ -path $baseFolder
+        $allArtifacts = GetArtifacts -token $token -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY -mask "Apps" -projects $projects -Version $artifacts -branch "main"
+        if ($allArtifacts) {
+            $allArtifacts | ForEach-Object {
+                $appFile = DownloadArtifact -token $token -artifact $_ -path $baseFolder
+                if (!(Test-Path $appFile)) {
+                    throw "Unable to download artifact $($_.name)"
+                }
             }
         }
-        $apps = @((Get-ChildItem -Path $baseFolder) | ForEach-Object { $_.FullName })
-        if (!($apps)) {
-            throw "Unable to download artifact $($project.Replace('\','_'))-Apps-$artifacts"
+        else {
+            throw "Could not find any Apps artifacts for projects $projects, version $artifacts"
         }
     }
 
@@ -96,9 +94,10 @@ try {
     if (-not ($ENV:AUTHCONTEXT)) {
         throw "An environment secret for environment($environmentName) called AUTHCONTEXT containing authentication information for the environment was not found.You must create an environment secret."
     }
+    $authContext = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($ENV:AUTHCONTEXT))
 
     try {
-        $authContextParams = $ENV:AUTHCONTEXT | ConvertFrom-Json | ConvertTo-HashTable
+        $authContextParams = $authContext | ConvertFrom-Json | ConvertTo-HashTable
         $bcAuthContext = New-BcAuthContext @authContextParams
     } catch {
         throw "Authentication failed. $([environment]::Newline) $($_.exception.message)"
